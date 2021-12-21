@@ -568,7 +568,9 @@ def frequency_domain(rri, band_type=None, lf_bw=0.11, hf_bw=0.1, plot=0):
     # Resample @ 4 Hz
     fsResamp = 4
     tmStamps = np.cumsum(NNs)  # in seconds
-    f = interpolate.interp1d(tmStamps, NNs, 'cubic')
+    f = interpolate.interp1d(tmStamps, NNs, 'linear')
+    # f = PchipInterpolator(tmStamps, NNs, extrapolate=True)
+    # f = interpolate.Akima1DInterpolator(tmStamps, NNs, axis=0)
     tmInterp = np.arange(tmStamps[0], tmStamps[-1], 1 / fsResamp)
     RRinterp = f(tmInterp)
 
@@ -1663,7 +1665,7 @@ class DirectoryIterator(Iterator):
                                             (dirpath, white_list_formats,
                                              self.class_indices, follow_links)))
 
-        batches = []
+        batches_im = []
         for res in results:
             classes, filenames = res.get()
             # concaténation des classes
@@ -1671,7 +1673,7 @@ class DirectoryIterator(Iterator):
             # build batch of image data
             filename = filenames
             # nom des fichiers images du DB
-            batches.append(filenames)
+            batches_im.append(filenames)
             i += len(classes)
         # ------------------------------TO DO----------------------------------------------------
         # -------------- --------------- Apply Overlapping---------------------------------------
@@ -1679,49 +1681,38 @@ class DirectoryIterator(Iterator):
 
         len_images = self.samples1
 
-        classes_hr = []
-        batches_hr = []
+        classes_bp = []
+        batches_ppg = []
         for subdir in sorted(os.listdir(label_dir)):
             if os.path.isdir(os.path.join(label_dir, subdir)):
                 tasks = os.path.join(label_dir, subdir)
                 for task in sorted(os.listdir(tasks)):
                     cls = os.path.join(tasks, task)
-                    classes_hr.append(cls)
-        for ti in classes_hr:
+                    classes_bp.append(cls)
+        for ti in classes_bp:
             list_dir2 = os.listdir(ti)
 
-            # ---------------------------------TODO----------------------------------------------------
-            # -------------- replace HR ground truth by PPG signal (Blood Pressure signal)-------------
-            heart_rate = [filename for filename in list_dir2 if filename.startswith("BP_mm")]
-            for hr in heart_rate:
-                Heart_rate_resampled = os.path.join(ti + '/' + hr)
-                with open(Heart_rate_resampled, 'r') as file:
-                    heart = [line.rstrip('\n') for line in file]
-                    batches_hr.append(heart)
-        li = []
-        y1 = []
-        ii = []
-        Heart_Rate = []
+            # -------------- Read BP signal files-------------
+            BP_file = [filename for filename in list_dir2 if filename.startswith("BP_mm")]
+            for bp in BP_file:
+                PPG = os.path.join(ti + '/' + bp)
+                with open(PPG, 'r') as file:
+                    PPG_values = [line.rstrip('\n') for line in file]
+                    batches_ppg.append(PPG_values)
 
-        # -----------------------------------------TODO--------------------------------------------
+        preprocessed_sig = []
+
         # -------------------------------Downsampling of PPG signal--------------------------------
-        for filename in batches_hr:
-            # df = pd.read_csv(filename, sep='\t')
-            sps = round(1000 / 25)
-            resample = filename[0::sps]
-            resample = filename
-
+        for filename in batches_ppg:
             sampling_rate = 1000
             time = np.arange(0, ((len(filename) / sampling_rate) - 1 // sampling_rate), 1 / sampling_rate)
-            #sig = sig[0:-(len(sig)-len(heart))]
-            #sig_sys = sig_sys[0:-(len(sig_sys) - len(heart))]
-            time256 = np.arange(time[0], time[-1], 1 / 25)
+            time25 = np.arange(time[0], time[-1], 1 / 25)
 
-            signal256 = PchipInterpolator(time, filename, extrapolate=False)
-            sig256 = signal256(time256)
+            # -------------------------------Detrending & smoothing--------------------------------
 
-            #plt.plot(sig256)
-            sig_filtred = bandpass_butter(sig256, 0.6, 4, 25, 2)
+            signal25 = PchipInterpolator(time, filename, extrapolate=False)
+            sig25 = signal25(time25)
+            sig_filtred = bandpass_butter(sig25, 0.6, 4, 25, 2)
 
             nbr_pt = 25
             v = np.ones((1, round(nbr_pt / 2)))
@@ -1729,57 +1720,44 @@ class DirectoryIterator(Iterator):
             a = sum(b)
             b = b.reshape((-1,))
             sig_liss = signal.filtfilt(b, a, sig_filtred)
-            # print(sig_liss)
 
-            secs = len(sig_liss) / 1000  # Number of seconds in signal X
-            samps = secs * 25  # Number of samples to downsampqle
-            # Y = resample(sig_filtred, int(round(samps)), domain='time')
+            preprocessed_sig.append(sig_liss)
 
+        ppgi = []
 
-            # plt.plot(sig256)
-            # # plt.plot(sig_filtred)
-            # plt.plot(sig_liss)
-            # # plt.plot(Y)
-            # plt.show()
-
-            li.append(sig_liss)
-
-
-
-        for i in range(len(li) - (len(li) - len(batches))):
-            # A = self.samples1[i]
-            B = li[i]
-            C = len(batches[i])
-            xx = len(B) - C
-            # print(xx, C, len(B))
+        for i in range(len(preprocessed_sig) - (len(preprocessed_sig) - len(batches_im))):
+            ppg = preprocessed_sig[i]
+            im = len(batches_im[i])
+            xx = len(ppg) - im
+            # print(xx, im, len(ppg))
             if xx > 0:
-                B = B[0:C]
+                ppg = ppg[0:im]
             elif xx < 0:
                 for test in range(-xx):
-                    batches[i].pop()
-            xx = len(B) - len(batches[i])
+                    batches_im[i].pop()
+            xx = len(ppg) - len(batches_im[i])
             # print("after =", xx, len(batches[i]), len(B))
 
-            heart_rate = B
-
-            ########################## overlapping ##############################
-            overlapping = 50
-            y = heart_rate
+            ########################## overlapping PPG ##############################
+            overlapping = self.frames_per_step
             # print(len(y))
-            for k in range((len(y) - self.frames_per_step) // overlapping):
-                batches_hr = y[k * overlapping: k * overlapping + self.frames_per_step]
-                for i in batches_hr:
-                    Heart_Rate.append(float(i))
+            for k in range((len(ppg) - self.frames_per_step) // overlapping):
+                batches_ppgi = ppg[k * overlapping: k * overlapping + self.frames_per_step]
+                for l in batches_ppgi:
+                    ppgi.append(float(l))
 
-        for j in batches:
+
+        ########################## overlapping videos ##############################
+
+        for j in batches_im:
             for k in range((len(j) - self.frames_per_step) // overlapping):
-                batch = j[k * overlapping: k * overlapping + self.frames_per_step]
-                for x in batch:
-                    self.filenames.append(x)
+                batch_im = j[k * overlapping: k * overlapping + self.frames_per_step]
+                for im in batch_im:
+                    self.filenames.append(im)
 
         # nombre de PPG & nombre d'image
-        print(len(Heart_Rate), len(self.filenames))
-        self.heart_rate = Heart_Rate
+        print(len(ppgi), len(self.filenames))
+        self.PPG = ppgi
         # print(len(self.heart_rate))
         pool.close()
         pool.join()
@@ -1808,11 +1786,11 @@ class DirectoryIterator(Iterator):
         #Generate N batches of output (HRV-features) according to the batch-size
 
         for i in range(int(len(index_array))):
-            ppg = self.heart_rate[index_array[i]]
+            ppg = self.PPG[index_array[i]]
             batches.append(ppg)
         for k in range((len(batches)) // self.frames_per_step):
-            batches_hr1 = batches[k * self.frames_per_step:(k + 1) * self.frames_per_step]
-            batches_PPG.append(batches_hr1)
+            batches_ppg1 = batches[k * self.frames_per_step:(k + 1) * self.frames_per_step]
+            batches_PPG.append(batches_ppg1)
 
         batch_y = []
         for batch in batches_PPG:
@@ -1829,6 +1807,11 @@ class DirectoryIterator(Iterator):
 
             ibi = iHR_peaks * 1000
 
+            # plt.plot(batch)
+            # # plt.plot(peaks, x[peaks], "x")
+            # plt.show()
+
+
             # rr_2 = np.gradient(indexes_peaks)
 
             # print("Frequency domain metrics:")
@@ -1836,7 +1819,7 @@ class DirectoryIterator(Iterator):
 
             batch_i = []
             for k, v in results_2.items():
-                # print("- %s: %.2f" % (k, v))
+                print("- %s: %.2f" % (k, v))
                 batch_i.append(round(v, 2))
             # print("Time domain metrics:")
             time_domain_metrics = timedomain(iHR_peaks, rr)
@@ -1856,8 +1839,7 @@ class DirectoryIterator(Iterator):
             batch_x1[i] = x
 
         batch_x = batch_x1.reshape((-1,) + (self.frames_per_step,) + self.image_shape)
-
-
+        print(os.path.join(self.directory, fname))
         # optionally save augmented images to disk for debugging purposes
         if self.save_to_dir:
             for i in range(current_batch_size):
@@ -1895,8 +1877,10 @@ if __name__ == '__main__':
     datagen = ImageDataGenerator()
 
     batch_size = 1
+    # train_data = datagen.flow_from_directory(directory='G:/rrr', label_dir='G:/hhh',
+
     train_data = datagen.flow_from_directory(directory='G:/ROI_BP4D', label_dir='G:/HR_BP4D_save_djamal',
-                                             target_size=(120, 160), class_mode='label', batch_size=2,
+                                             target_size=(160, 120), class_mode='label', batch_size=2,
                                              frames_per_step=100, shuffle=False)
 
     for data in train_data:
